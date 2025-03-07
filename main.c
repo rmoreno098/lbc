@@ -9,12 +9,16 @@
 #define DOMAIN "127.0.0.1"
 #define PORT "48963"
 #define BACKLOG 5
-#define DEFAULT_BUFFER_SIZE 9216
+#define DEFAULT_BUFFER_SIZE 4096
 
 struct addrinfo hints, *res;
 
+void handle_get(int client_fd, char *path) {}
+
+void handle_post(int client_fd, char *path) {}
+
 void parse_request(int client_fd) {
-  char request[DEFAULT_BUFFER_SIZE];
+  char request[DEFAULT_BUFFER_SIZE]; // Make dynamic
 
   int bytes_recv = recv(client_fd, request, DEFAULT_BUFFER_SIZE, 0);
   if (bytes_recv == DEFAULT_BUFFER_SIZE) {
@@ -23,6 +27,29 @@ void parse_request(int client_fd) {
   }
 
   printf("Size of request: %d\n%s", bytes_recv, request);
+  char *method = strtok(request, " ");
+  char *path = strtok(NULL, " ");
+  char *protocol = strtok(NULL, "\r\n");
+
+  if (strstr(protocol, "HTTP/1.1") <= 0) {
+    char *response = "HTTP/1.1 400 Bad Request\nContent-Type: text/html\n\n";
+    send(client_fd, response, strlen(response), 0);
+    close(client_fd);
+    exit(1);
+  }
+
+  if (strcmp(method, "GET") == 0) {
+    handle_get(client_fd, path);
+  } else if (strcmp(method, "POST") == 0) {
+    handle_post(client_fd, path);
+  } else {
+    char *response = "HTTP/1.1 405 Method Not Allowed\nContent-Type: "
+                     "text/html\n\n<html><body><h1>405 Method Not "
+                     "Allowed</h1></body></html>";
+    send(client_fd, response, strlen(response), 0);
+    close(client_fd);
+    exit(1);
+  }
 }
 
 int main() {

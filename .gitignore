@@ -2,3 +2,4 @@
 /testing
 main
 main.o
+.env

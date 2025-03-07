@@ -1,0 +1,13 @@
+services:
+  server1:
+    image: "test"
+    ports:
+      - "12345:22222"
+  server2:
+    image: "test"
+    ports:
+      - "12346:22222"
+  server3:
+    image: "test"
+    ports:
+      - "12347:22222"
