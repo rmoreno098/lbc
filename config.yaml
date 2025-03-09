@@ -5,7 +5,7 @@ servers:
     port: 12346
 load_balancer:
   algorithm: "round_robin"
-  max_connections: 1000
-# logging:
-#   enabled: true
-#   level: "debug"
+  max_connections: 10
+logging:
+  enabled: true
+  level: "debug"

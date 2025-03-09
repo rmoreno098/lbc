@@ -1,4 +1,4 @@
-# all: main
+all: main
 
 main: main.o
 	gcc main.o -o main
