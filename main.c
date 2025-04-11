@@ -1,8 +1,11 @@
 #include <arpa/inet.h>
+#include <asm-generic/socket.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -12,8 +15,8 @@
 #define DEFAULT_BUFFER_SIZE 4096
 
 typedef struct Server {
-  char *port;
   char *domain;
+  char *port;
   int sock_fd;
 } Server;
 
@@ -25,9 +28,10 @@ typedef struct LoadBalancer {
 Server servers[] = {{"127.0.0.1", "12345"}, {"127.0.0.1", "12346"}};
 
 LoadBalancer *load_balancer_init();
-void server_connect(char *domain, char *port);
+char* handle_client(int client_fd, struct sockaddr_storage client_addr);
 void server_disconnect(Server *server);
-void handle_client(int client_fd);
+int server_connect(char *domain, char *port);
+void epoll_ctl_add(int epfd, int fd);
 
 int main() {
   LoadBalancer *lb = load_balancer_init();
@@ -35,11 +39,40 @@ int main() {
   int client_fd;
   struct sockaddr_storage client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
+  // struct epoll_event events[BACKLOG];
 
   while (1) {
     client_fd = accept(lb->server->sock_fd, (struct sockaddr *)&client_addr,
                        &client_addr_len);
-    handle_client(client_fd);
+
+    if (client_fd >= 0) {
+      int epoll_fd = epoll_create(1);
+      if (epoll_fd <= 0) {
+        perror("epoll_create");
+        exit(1);
+      }
+      epoll_ctl_add(epoll_fd, lb->server->sock_fd);
+    }
+
+    char* client_request = handle_client(client_fd, client_addr);
+
+    int backend_socket = server_connect(servers[0].domain, servers[0].port);
+
+    int y = send(backend_socket, client_request, strlen(client_request), 0);
+    if (y != strlen(client_request)) {
+      printf("Data send did not equal | actual: %d | expected: %lu\n", y,
+             strlen(client_request));
+    }
+
+    char request[DEFAULT_BUFFER_SIZE];
+    int bytes_recv = recv(backend_socket, request, DEFAULT_BUFFER_SIZE, 0);
+    if (bytes_recv < 0) {
+      perror("recv error");
+      close(backend_socket);
+      exit(1);
+    }
+
+    close(backend_socket);
   }
 
   server_disconnect(lb->server);
@@ -48,7 +81,44 @@ int main() {
   return 0;
 }
 
-void server_connect(char *domain, char *port) {}
+void epoll_ctl_add(int epfd, int fd) {
+  struct epoll_event event;
+  event.events = EPOLLIN | EPOLLOUT;
+  event.data.fd = fd;
+
+  if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0) {
+    perror("epoll_ctl");
+    exit(1);
+  }
+}
+
+int server_connect(char *domain, char *port) {
+  int sock_fd, conn;
+  struct sockaddr_in servaddr;
+
+  printf("Connecting to server: %s on port %d\n", domain, atoi(port));
+
+  sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+    perror("socket error");
+    exit(1);
+  }
+  bzero(&servaddr, sizeof(servaddr));
+
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_addr.s_addr = inet_addr(domain);
+  servaddr.sin_port = htons(atoi(port));
+
+  conn = connect(sock_fd, (struct sockaddr *)&servaddr, sizeof(servaddr));
+  if (conn < 0) {
+    perror("connect error");
+    exit(1);
+  }
+
+  printf("Connected to backend server\n");
+
+  return sock_fd;
+}
 
 void server_disconnect(Server *server) {
   close(server->sock_fd);
@@ -56,7 +126,7 @@ void server_disconnect(Server *server) {
   free(server);
 }
 
-void handle_client(int client_fd) {
+char* handle_client(int client_fd, struct sockaddr_storage client_addr) {
   char request[DEFAULT_BUFFER_SIZE]; // Make dynamic
 
   // Handle this better with a loop
@@ -67,7 +137,7 @@ void handle_client(int client_fd) {
     exit(1);
   }
 
-  printf("Size of request: %d\n%s", bytes_recv, request);
+  // printf("Size of request: %d\n%s", bytes_recv, request);
   char *method = strtok(request, " ");
   char *path = strtok(NULL, " ");
   char *protocol = strtok(NULL, "\r\n");
@@ -79,11 +149,7 @@ void handle_client(int client_fd) {
     exit(1);
   }
 
-  if (strcmp(method, "GET") == 0) {
-    // handle_get(client_fd, path);
-  } else if (strcmp(method, "POST") == 0) {
-    // handle_post(client_fd, path);
-  } else {
+  if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
     char *response = "HTTP/1.1 405 Method Not Allowed\nContent-Type: "
                      "text/html\n\n<html><body><h1>405 Method Not "
                      "Allowed</h1></body></html>";
@@ -101,6 +167,8 @@ void handle_client(int client_fd) {
            strlen(response));
   }
   close(client_fd);
+
+  return response;
 }
 
 LoadBalancer *load_balancer_init() {
@@ -126,6 +194,14 @@ LoadBalancer *load_balancer_init() {
     exit(1);
   }
 
+  int fd =
+      setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+  if (fd < 0) {
+    perror("setsockopt error");
+    close(sock_fd);
+    exit(1);
+  }
+
   if (bind(sock_fd, lb->res->ai_addr, lb->res->ai_addrlen) < 0) {
     perror("bind error");
     close(sock_fd);
@@ -138,7 +214,7 @@ LoadBalancer *load_balancer_init() {
     exit(1);
   }
 
-  printf("Server listening on %s:%s...\n", DOMAIN, PORT);
+  printf("Load balancer listening on %s:%s...\n", DOMAIN, PORT);
   lb->server->sock_fd = sock_fd;
 
   return lb;
