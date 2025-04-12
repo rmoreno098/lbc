@@ -39,7 +39,6 @@ int main() {
   int client_fd;
   struct sockaddr_storage client_addr;
   socklen_t client_addr_len = sizeof(client_addr);
-  // struct epoll_event events[BACKLOG];
 
   while (1) {
     client_fd = accept(lb->server->sock_fd, (struct sockaddr *)&client_addr,
@@ -55,13 +54,12 @@ int main() {
     }
 
     char* client_request = handle_client(client_fd, client_addr);
-
     int backend_socket = server_connect(servers[0].domain, servers[0].port);
-
-    int y = send(backend_socket, client_request, strlen(client_request), 0);
-    if (y != strlen(client_request)) {
-      printf("Data send did not equal | actual: %d | expected: %lu\n", y,
-             strlen(client_request));
+    int client_send = send(backend_socket, client_request, strlen(client_request), 0); // Track number of bytes sent
+    if (client_send < 0) {
+      perror("send error");
+      close(backend_socket);
+      exit(1);
     }
 
     char request[DEFAULT_BUFFER_SIZE];
@@ -71,8 +69,11 @@ int main() {
       close(backend_socket);
       exit(1);
     }
-
     close(backend_socket);
+
+    int client_response = send(client_fd, request, strlen(request), 0);
+    close(client_fd);
+    printf("Received %d bytes from backend server and sent %d bytes to client\n", bytes_recv, client_response);
   }
 
   server_disconnect(lb->server);
@@ -96,18 +97,17 @@ int server_connect(char *domain, char *port) {
   int sock_fd, conn;
   struct sockaddr_in servaddr;
 
-  printf("Connecting to server: %s on port %d\n", domain, atoi(port));
+  bzero(&servaddr, sizeof(servaddr));
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_addr.s_addr = inet_addr(domain);
+  servaddr.sin_port = htons(atoi(port));
+  printf("Connecting to backend server: %s on port %d\n", domain, atoi(port));
 
   sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd < 0) {
     perror("socket error");
     exit(1);
   }
-  bzero(&servaddr, sizeof(servaddr));
-
-  servaddr.sin_family = AF_INET;
-  servaddr.sin_addr.s_addr = inet_addr(domain);
-  servaddr.sin_port = htons(atoi(port));
 
   conn = connect(sock_fd, (struct sockaddr *)&servaddr, sizeof(servaddr));
   if (conn < 0) {
@@ -116,7 +116,6 @@ int server_connect(char *domain, char *port) {
   }
 
   printf("Connected to backend server\n");
-
   return sock_fd;
 }
 
@@ -127,7 +126,8 @@ void server_disconnect(Server *server) {
 }
 
 char* handle_client(int client_fd, struct sockaddr_storage client_addr) {
-  char request[DEFAULT_BUFFER_SIZE]; // Make dynamic
+  char* request = malloc(DEFAULT_BUFFER_SIZE);
+  bzero(request, DEFAULT_BUFFER_SIZE);
 
   // Handle this better with a loop
   int bytes_recv = recv(client_fd, request, DEFAULT_BUFFER_SIZE, 0);
@@ -136,39 +136,8 @@ char* handle_client(int client_fd, struct sockaddr_storage client_addr) {
     close(client_fd);
     exit(1);
   }
-
-  // printf("Size of request: %d\n%s", bytes_recv, request);
-  char *method = strtok(request, " ");
-  char *path = strtok(NULL, " ");
-  char *protocol = strtok(NULL, "\r\n");
-
-  if (strcmp(protocol, "HTTP/1.1") != 0) {
-    char *response = "HTTP/1.1 400 Bad Request\nContent-Type: text/html\n\n";
-    send(client_fd, response, strlen(response), 0);
-    close(client_fd);
-    exit(1);
-  }
-
-  if (strcmp(method, "GET") != 0 && strcmp(method, "POST") != 0) {
-    char *response = "HTTP/1.1 405 Method Not Allowed\nContent-Type: "
-                     "text/html\n\n<html><body><h1>405 Method Not "
-                     "Allowed</h1></body></html>";
-    send(client_fd, response, strlen(response), 0);
-    close(client_fd);
-    exit(1);
-  }
-
-  char *response =
-      "HTTP/1.1 200 OK\nContent-Type: text/html\n\n<html><body><h1>Hello, "
-      "World!</h1></body></html>";
-  int x = send(client_fd, response, strlen(response), 0);
-  if (x != strlen(response)) {
-    printf("Data send did not equal | actual: %d | expected: %lu\n", x,
-           strlen(response));
-  }
-  close(client_fd);
-
-  return response;
+  printf("Size of request: %d\n%s", bytes_recv, request);
+  return request;
 }
 
 LoadBalancer *load_balancer_init() {
