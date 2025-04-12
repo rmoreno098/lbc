@@ -1,0 +1,11 @@
+servers:
+  - address: "127.0.0.1"
+    port: 12345
+  - address: "127.0.0.1"
+    port: 12346
+load_balancer:
+  algorithm: "round_robin"
+  max_connections: 10
+logging:
+  enabled: true
+  level: "debug"
