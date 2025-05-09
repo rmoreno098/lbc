@@ -1,6 +1,7 @@
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <signal.h>
 #include <stdio.h>
@@ -32,10 +33,11 @@ typedef struct LoadBalancer {
 Server servers[] = {{"127.0.0.1", "12345"}, {"127.0.0.1", "12346"}};
 
 LoadBalancer *load_balancer_init();
-char *handle_client(int client_fd, struct sockaddr_storage client_addr);
+char *handle_client(int client_fd);
 void server_disconnect(Server *server);
 int server_connect(char *domain, char *port);
 void epoll_ctl_add(int epfd, int fd);
+void lb_shutdown(LoadBalancer *lb);
 
 static void signal_handler(int signum) {
   if (signum == SIGINT) {
@@ -43,70 +45,100 @@ static void signal_handler(int signum) {
   }
 }
 
+void set_non_block(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 int main() {
   LoadBalancer *lb = load_balancer_init();
-
-  int client_fd;
-  struct sockaddr_storage client_addr;
-  socklen_t client_addr_len = sizeof(client_addr);
+  struct epoll_event events[BACKLOG];
 
   struct sigaction sa;
   sa.sa_handler = signal_handler;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
+
   if (sigaction(SIGINT, &sa, NULL) == -1) {
     perror("SIGINT");
     return -1;
   }
 
+  int epoll_fd = epoll_create(1);
+  if (epoll_fd <= 0) {
+    perror("epoll_create");
+    exit(1);
+  }
+
+  set_non_block(lb->server->sock_fd);
+  epoll_ctl_add(epoll_fd, lb->server->sock_fd);
+
   while (!stop_server) {
-    client_fd = accept(lb->server->sock_fd, (struct sockaddr *)&client_addr,
-                       &client_addr_len);
-    if (client_fd < 0) {
+    int nfds = epoll_wait(epoll_fd, events, BACKLOG, -1);
+    if (nfds < 0) {
       if (errno == EINTR && stop_server)
         break;
-      perror("accept");
+      perror("epoll_wait");
       continue;
     }
 
-    int epoll_fd = epoll_create(1);
-    if (epoll_fd <= 0) {
-      perror("epoll_create");
-      exit(1);
-    }
-    epoll_ctl_add(epoll_fd, lb->server->sock_fd);
+    for (int i = 0; i < nfds; i++) {
+      int fd = events[i].data.fd;
 
-    char *client_request = handle_client(client_fd, client_addr);
-    int backend_socket = server_connect(servers[0].domain, servers[0].port);
-    int client_send =
-        send(backend_socket, client_request, strlen(client_request),
-             0); // Track number of bytes sent
-    if (client_send < 0) {
-      perror("send error");
-      close(backend_socket);
-      exit(1);
-    }
+      if (fd == lb->server->sock_fd) { // accept new connections
+        int client_fd;
+        struct sockaddr_storage client_addr;
+        socklen_t client_addr_len = sizeof(client_addr);
 
-    char request[DEFAULT_BUFFER_SIZE];
-    int bytes_recv = recv(backend_socket, request, DEFAULT_BUFFER_SIZE, 0);
-    if (bytes_recv < 0) {
-      perror("recv error");
-      close(backend_socket);
-      exit(1);
-    }
-    close(backend_socket);
+        client_fd = accept(lb->server->sock_fd, (struct sockaddr *)&client_addr,
+                           &client_addr_len);
 
-    int client_response = send(client_fd, request, strlen(request), 0);
-    close(client_fd);
-    printf(
-        "Received %d bytes from backend server and sent %d bytes to client\n",
-        bytes_recv, client_response);
-  }
+        if (client_fd < 0) {
+          if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+          perror("accept");
+          continue;
+        }
 
-  printf("\nShutting down...\n");
-  server_disconnect(lb->server);
-  freeaddrinfo(lb->res);
-  printf("Load balancer shutdown.\n");
+        set_non_block(client_fd);
+        epoll_ctl_add(epoll_fd, client_fd);
+      } else { // handle current connections
+        char *client_request = handle_client(fd);
+        int backend_socket =
+            server_connect(servers[0].domain,
+                           servers[0].port); // connects to a backend server
+
+        // forward client payload to server
+        int client_send =
+            send(backend_socket, client_request, strlen(client_request),
+                 0); // Track number of bytes sent
+        if (client_send < 0) {
+          perror("send error");
+          close(backend_socket);
+          exit(1);
+        }
+
+        // send server response back to client
+        char request[DEFAULT_BUFFER_SIZE];
+        int bytes_recv = recv(backend_socket, request, DEFAULT_BUFFER_SIZE, 0);
+        if (bytes_recv < 0) {
+          perror("recv error");
+          close(backend_socket);
+          exit(1);
+        }
+        close(backend_socket);
+
+        int client_response = send(fd, request, strlen(request), 0);
+        close(fd);
+        printf("Received %d bytes from backend server and sent %d bytes to "
+               "client\n",
+               bytes_recv, client_response);
+      }
+    } // nfds
+  } // stop_server
+
+  lb_shutdown(lb);
+  close(epoll_fd);
 
   return 0;
 }
@@ -130,7 +162,7 @@ int server_connect(char *domain, char *port) {
   servaddr.sin_family = AF_INET;
   servaddr.sin_addr.s_addr = inet_addr(domain);
   servaddr.sin_port = htons(atoi(port));
-  printf("Connecting to backend server: %s on port %d\n", domain, atoi(port));
+  printf("Connecting to backend server [%s:%d]...\n", domain, atoi(port));
 
   sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (sock_fd < 0) {
@@ -153,18 +185,36 @@ void server_disconnect(Server *server) {
   free(server);
 }
 
-char *handle_client(int client_fd, struct sockaddr_storage client_addr) {
+void lb_shutdown(LoadBalancer *lb) {
+  printf("\nShutting down...\n");
+  server_disconnect(lb->server);
+  freeaddrinfo(lb->res);
+  printf("Load balancer shutdown.\n");
+}
+
+char *handle_client(int client_fd) {
   char *request = malloc(DEFAULT_BUFFER_SIZE);
   bzero(request, DEFAULT_BUFFER_SIZE);
 
-  // Handle this better with a loop
-  int bytes_recv = recv(client_fd, request, DEFAULT_BUFFER_SIZE, 0);
-  if (bytes_recv < 0) {
-    perror("recv error");
-    close(client_fd);
-    exit(1);
+  int total_bytes = 0;
+  while (1) {
+    int bytes_recv = recv(client_fd, request, DEFAULT_BUFFER_SIZE, 0);
+    if (bytes_recv < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        break;
+      } else {
+        perror("recv error");
+        close(client_fd);
+        exit(1);
+      }
+    } else if (bytes_recv == 0) { // no more bytes to read, close connection
+      close(client_fd);
+      break;
+    }
+    total_bytes += bytes_recv; // keep reading
   }
-  printf("Size of request: %d\n%s", bytes_recv, request);
+
+  printf("Size of request: %d\n%s\n", total_bytes, request);
   return request;
 }
 

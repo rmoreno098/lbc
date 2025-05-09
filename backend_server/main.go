@@ -21,7 +21,7 @@ func init() {
 
 func IndexHandler(rw http.ResponseWriter, r *http.Request) {
 	log.Printf("Recieved request: %s\n", r.Header)
-	fmt.Fprintf(rw, "Recieved request from server: %s", SERVER_PORT)
+	fmt.Fprintf(rw, "Recieved request from server: %s\n", SERVER_PORT)
 }
 
 func main() {
