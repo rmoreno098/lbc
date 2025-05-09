@@ -1,13 +1,13 @@
 services:
-  server1:
-    image: "test"
-    ports:
-      - "12345:22222"
-  server2:
-    image: "test"
-    ports:
-      - "12346:22222"
-  server3:
-    image: "test"
-    ports:
-      - "12347:22222"
+    server1:
+        image: "lbc"
+        ports:
+            - "12345:22222"
+    server2:
+        image: "lbc"
+        ports:
+            - "12346:22222"
+    server3:
+        image: "lbc"
+        ports:
+            - "12347:22222"
