@@ -1,12 +1,15 @@
-all: main
+all: run
+
+main.o: src/main.c
+	gcc -Wall -g -c src/main.c -o ./build/main.o
 
 main: main.o
-	gcc main.o -o main
+	gcc ./build/main.o -o ./build/main
 
-main.o: main.c
-	gcc -Wall -g -c main.c -o main.o
+run: main
+	./build/main
 
 clean:
-	rm -f main.o main
+	rm -f build/main.o build/main
 
 rebuild: clean all
