@@ -5,10 +5,13 @@ RUN apt-get update && apt-get install -y \
     gcc \
     gdb \
     strace \
-    vim \
-    git \
+    libc6-dev \
+    linux-libc-dev \
     net-tools \
     iputils-ping \
+    vim \
+    git \
     && apt-get clean
+
 
 WORKDIR /app
